@@ -1,68 +1,22 @@
-from utils import get_device
+from utils import get_device, get_2d_sincos_pos_embed
 
 import torch
-import numpy as np
-
 from transformers import AutoModelForCausalLM, AutoTokenizer, CLIPVisionModel, CLIPImageProcessor
 from peft import get_peft_model, IA3Config, TaskType
 
-
-# https://github.com/facebookresearch/mae/blob/efb2a8062c206524e35e47d04501ed4f544c0ae8/util/pos_embed.py#L20
-def get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False):
-    """
-    grid_size: int of the grid height and width
-    return:
-    pos_embed: [grid_size*grid_size, embed_dim] or [1+grid_size*grid_size, embed_dim] (w/ or w/o cls_token)
-    """
-    grid_h = np.arange(grid_size, dtype=np.float32)
-    grid_w = np.arange(grid_size, dtype=np.float32)
-    grid = np.meshgrid(grid_w, grid_h)  # here w goes first
-    grid = np.stack(grid, axis=0)
-
-    grid = grid.reshape([2, 1, grid_size, grid_size])
-    pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
-    if cls_token:
-        pos_embed = np.concatenate([np.zeros([1, embed_dim]), pos_embed], axis=0)
-    return pos_embed
-
-
-def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
-    assert embed_dim % 2 == 0
-
-    # use half of dimensions to encode grid_h
-    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])  # (H*W, D/2)
-    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])  # (H*W, D/2)
-
-    emb = np.concatenate([emb_h, emb_w], axis=1) # (H*W, D)
-    return emb
-
-
-def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
-    """
-    embed_dim: output dimension for each position
-    pos: a list of positions to be encoded: size (M,)
-    out: (M, D)
-    """
-    assert embed_dim % 2 == 0
-    omega = np.arange(embed_dim // 2, dtype=np.float32)
-    omega /= embed_dim / 2.
-    omega = 1. / 10000**omega  # (D/2,)
-
-    pos = pos.reshape(-1)  # (M,)
-    out = np.einsum('m,d->md', pos, omega)  # (M, D/2), outer product
-
-    emb_sin = np.sin(out) # (M, D/2)
-    emb_cos = np.cos(out) # (M, D/2)
-
-    emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
-    return emb
+from typing import Optional
 
 
 class LVLM(torch.nn.Module):
-    def __init__(self, language_model: str, vision_model: str, num_queries: int = 32) -> None:
+    def __init__(self, 
+                 language_model: str, 
+                 vision_model: str, 
+                 num_queries: int = 32,
+                 device: Optional[torch.device] = None,
+        ) -> None:
         # initialize module
         super().__init__()
-        self.device = "cpu" # get_device()
+        self.device = get_device() if not device else device
         
         # base models
         self.llm = AutoModelForCausalLM.from_pretrained(language_model, trust_remote_code=True).to(self.device)
@@ -82,8 +36,6 @@ class LVLM(torch.nn.Module):
             feedforward_modules=["lm_head"]
         )
         self.llm = get_peft_model(self.llm, ia3_config)
-        print(self.llm)
-        print("trainable params:", list(n for n, _ in filter(lambda x: x[1].requires_grad, self.llm.named_parameters())))
         
         # adapter between vision and llm
         embed_dim = self.llm.config.hidden_size
@@ -163,7 +115,9 @@ if __name__ == "__main__":
     text_input = ["what is in this image?", "what does a cat do?"]
     text_output = ["cat", "cat says meow!"]
     # create model
-    model = LVLM(language_model="stabilityai/stablelm-3b-4e1t", vision_model="openai/clip-vit-large-patch14")
+    model = LVLM(language_model="stabilityai/stablelm-3b-4e1t", vision_model="openai/clip-vit-large-patch14", device="cpu")
+    print(model.llm)
+    print("trainable params:", list(n for n, _ in filter(lambda x: x[1].requires_grad, model.named_parameters())))
     # model = LVLM(language_model="facebook/opt-1.3b", vision_model="openai/clip-vit-base-patch32")
     image = model.image_processor([image, image], return_tensors="pt")["pixel_values"].to(model.device)
     print("image:", image.shape)
