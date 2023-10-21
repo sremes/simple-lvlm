@@ -9,7 +9,7 @@ This code implements a very simple large vision-language model.
 
 ## ROCm Docker
 
-Fill in Huggingface token into `docker.env.list`. Then build the docker image and source the convenient alias `rocm` from `env.sh` to run commands inside the container.
+Fill in Huggingface token into `docker.env`. Then build the docker image and source the convenient alias `rocm` from `env.sh` to run commands inside the container.
 ```bash
 docker build -f Dockerfile .
 docker tag "image_id_from_above" rocm-transformers
