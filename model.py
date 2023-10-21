@@ -5,6 +5,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, CLIPVisionModel, C
 from peft import get_peft_model, IA3Config, TaskType
 
 from typing import Optional
+import os
 
 
 class LVLM(torch.nn.Module):
@@ -19,8 +20,8 @@ class LVLM(torch.nn.Module):
         self.device = get_device() if not device else device
         
         # base models
-        self.llm = AutoModelForCausalLM.from_pretrained(language_model, trust_remote_code=True).to(self.device)
-        self.tokenizer = AutoTokenizer.from_pretrained(language_model)
+        self.llm = AutoModelForCausalLM.from_pretrained(language_model, trust_remote_code=True, token=os.getenv("HUGGING_FACE_HUB_TOKEN")).to(self.device)
+        self.tokenizer = AutoTokenizer.from_pretrained(language_model, token=os.getenv("HUGGING_FACE_HUB_TOKEN"))
         self.tokenizer.pad_token = self.tokenizer.eos_token
         
         self.vision_model = CLIPVisionModel.from_pretrained(vision_model).to(self.device)
@@ -115,7 +116,7 @@ if __name__ == "__main__":
     text_input = ["what is in this image?", "what does a cat do?"]
     text_output = ["cat", "cat says meow!"]
     # create model
-    model = LVLM(language_model="stabilityai/stablelm-3b-4e1t", vision_model="openai/clip-vit-large-patch14", device="cpu")
+    model = LVLM(language_model="stabilityai/stablelm-3b-4e1t", vision_model="openai/clip-vit-large-patch14")
     print(model.llm)
     print("trainable params:", list(n for n, _ in filter(lambda x: x[1].requires_grad, model.named_parameters())))
     # model = LVLM(language_model="facebook/opt-1.3b", vision_model="openai/clip-vit-base-patch32")
