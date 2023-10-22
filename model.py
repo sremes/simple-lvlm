@@ -61,16 +61,23 @@ class LVLM(torch.nn.Module):
             bias=False,
             batch_first=True,
             device=self.device,
+            dtype=torch.bfloat16,
         )
         self.vision_linear = torch.nn.Sequential(
             torch.nn.Linear(
-                self.vision_model.config.hidden_size, embed_dim, device=self.device
+                self.vision_model.config.hidden_size,
+                embed_dim,
+                device=self.device,
+                dtype=torch.bfloat16,
             ),
-            torch.nn.LayerNorm(embed_dim, device=self.device),
+            torch.nn.LayerNorm(embed_dim, device=self.device, dtype=torch.bfloat16),
         )
         self.num_queries = num_queries
         self.queries = torch.nn.Parameter(
-            0.1 * torch.randn((1, num_queries, embed_dim), device=self.device)
+            0.1
+            * torch.randn(
+                (1, num_queries, embed_dim), device=self.device, dtype=torch.bfloat16
+            )
         )
 
         # position embeddings
@@ -81,7 +88,7 @@ class LVLM(torch.nn.Module):
             torch.nn.Parameter(
                 torch.from_numpy(
                     get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=True)
-                ).float(),
+                ).bfloat16(),
                 requires_grad=False,
             )
             .unsqueeze(dim=0)
