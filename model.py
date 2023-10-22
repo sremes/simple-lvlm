@@ -173,6 +173,31 @@ class LVLM(torch.nn.Module):
         )
         return output.loss
 
+    def generate(self, image: torch.Tensor, question: str, **kwargs) -> str:
+        # get image tokens for llm
+        image_embeds = self.get_image_tokens(image)
+        # tokenize and embed texts
+        input_tokens = self.tokenizer(
+            text=[f"\nQuestion: {question}\nAnswer: "],
+            return_tensors="pt",
+        ).to(self.device)
+        input_embeds = self.llm.get_input_embeddings()(input_tokens.input_ids)
+        # cat image tokens and text tokens
+        inputs_embeds = torch.cat([image_embeds, input_embeds], dim=1)
+        inputs_attention_mask = torch.cat(
+            [
+                torch.ones(image_embeds.shape[:-1], device=self.device),
+                input_tokens.attention_mask,
+            ],
+            dim=1,
+        )
+        output = self.llm.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=inputs_attention_mask,
+            **kwargs,
+        )[0]
+        return self.tokenizer.decode(output, skip_special_tokens=True)
+
 
 if __name__ == "__main__":
     # create inputs
