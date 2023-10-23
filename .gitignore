@@ -1,6 +1,7 @@
 venv/
 cache/
 __pycache__/
+.vscode/
 docker.env
 data/
 checkpoints/
