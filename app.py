@@ -14,7 +14,7 @@ def load_model(checkpoint_path: Path) -> LVLM:
         language_model="stabilityai/stablelm-3b-4e1t",
         vision_model="openai/clip-vit-large-patch14",
     )
-    model.load_state_dict(torch.load(checkpoint_path), strict=False)
+    model.load_state_dict(torch.load(checkpoint_path)["model_state_dict"], strict=False)
 
 
 def load_image(image_path: Path) -> torch.Tensor:
