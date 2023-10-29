@@ -12,7 +12,12 @@ from pathlib import Path
 import random
 from itertools import pairwise
 
-logging.basicConfig(filename="train.log", encoding="utf-8", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s %(levelname)-8s %(message)s",
+    filename="train.log",
+    encoding="utf-8",
+    level=logging.INFO,
+)
 logging.getLogger().addHandler(logging.StreamHandler())
 
 
@@ -90,6 +95,7 @@ def save_checkpoint(
 def load_checkpoint(
     model: torch.nn.Module, optimizer: torch.optim.Optimizer, path: Path
 ) -> None:
+    logging.info(f"Loading checkpoint from {path}")
     ckpt = torch.load(path, map_location="cpu")
     model.load_state_dict(ckpt["model_state_dict"], strict=False)
     optimizer.load_state_dict(ckpt["optimizer_state_dict"])
