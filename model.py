@@ -6,8 +6,9 @@ from transformers import (
     AutoTokenizer,
     CLIPVisionModel,
     CLIPImageProcessor,
+    BitsAndBytesConfig
 )
-from peft import get_peft_model, IA3Config, TaskType
+from peft import get_peft_model, prepare_model_for_kbit_training, IA3Config, LoraConfig, TaskType
 
 from typing import Optional
 import os
@@ -25,35 +26,77 @@ class LVLM(torch.nn.Module):
         super().__init__()
         self.device = get_device() if not device else device
 
-        # base models
-        self.llm = AutoModelForCausalLM.from_pretrained(
-            language_model,
-            torch_dtype=torch.bfloat16,
-            trust_remote_code=True,
-            token=os.getenv("HUGGING_FACE_HUB_TOKEN"),
-        ).to(self.device)
+        # load the LLM
+        if self.device.type == "cuda":
+            # "cuda" supports quantization, use it!
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4"
+            )
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                language_model,
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True,
+                token=os.getenv("HUGGING_FACE_HUB_TOKEN"),
+                quantization_config=quantization_config,
+            )
+        else:
+            # load without quantization that requires "cuda" device
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                language_model,
+                torch_dtype=torch.bfloat16,
+                trust_remote_code=True,
+                token=os.getenv("HUGGING_FACE_HUB_TOKEN"),
+            ).to(self.device)
         self.tokenizer = AutoTokenizer.from_pretrained(
             language_model, token=os.getenv("HUGGING_FACE_HUB_TOKEN")
         )
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        self.vision_model = CLIPVisionModel.from_pretrained(
-            vision_model, torch_dtype=torch.bfloat16
-        ).to(self.device)
+        # add PEFT adapter
+        if False:
+            peft_config = IA3Config(
+                task_type=TaskType.CAUSAL_LM,
+                target_modules=["q_proj", "k_proj", "v_proj", "lm_head"],
+                feedforward_modules=["lm_head"],
+            )
+        else:
+            peft_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                target_modules=["q_proj", "k_proj", "v_proj", "lm_head"],
+                r=16,
+                lora_alpha=32,
+                lora_dropout=0.05,
+            )
+        self.llm = get_peft_model(self.llm, peft_config)
+
+        # load the CLIP vision model
+        if self.device.type == "cuda":
+            # "cuda" supports quantization, use it!
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4"
+            )
+            self.vision_model = CLIPVisionModel.from_pretrained(
+                vision_model, 
+                torch_dtype=torch.bfloat16, 
+                quantization_config=quantization_config,
+            )
+        else:
+            self.vision_model = CLIPVisionModel.from_pretrained(
+                vision_model, 
+                torch_dtype=torch.bfloat16,
+            ).to(self.device)
         for param in self.vision_model.parameters():
             param.requires_grad_(False)
         self.vision_model.eval()
         self.image_processor = CLIPImageProcessor.from_pretrained(vision_model)
 
-        # add ia3 adapter
-        ia3_config = IA3Config(
-            task_type=TaskType.CAUSAL_LM,
-            target_modules=["q_proj", "k_proj", "v_proj", "lm_head"],
-            feedforward_modules=["lm_head"],
-        )
-        self.llm = get_peft_model(self.llm, ia3_config)
-
-        # adapter between vision and llm
+        # create adapter between vision and llm models
         embed_dim = self.llm.config.hidden_size
         self.vision_adapter = torch.nn.MultiheadAttention(
             embed_dim=embed_dim,
@@ -133,7 +176,6 @@ class LVLM(torch.nn.Module):
             max_length=128,
             return_tensors="pt",
         ).to(self.device)
-        # full_embeds = self.llm.model.model.embed_tokens(full_tokens.input_ids)
         full_embeds = self.llm.get_input_embeddings()(full_tokens.input_ids)
         # cat image tokens and text tokens
         inputs_embeds = torch.cat([image_embeds, full_embeds], dim=1)
@@ -219,22 +261,9 @@ if __name__ == "__main__":
             n for n, _ in filter(lambda x: x[1].requires_grad, model.named_parameters())
         ),
     )
-    # model = LVLM(language_model="facebook/opt-1.3b", vision_model="openai/clip-vit-base-patch32")
     image = model.image_processor([image, image], return_tensors="pt")[
         "pixel_values"
     ].to(model.device)
     print("image:", image.shape)
     output = model(image, text_input, text_output)
     print("loss:", output)
-
-    optimizer = torch.optim.AdamW(
-        filter(lambda x: x.requires_grad, model.parameters()), lr=1e-4
-    )
-    for i in (bar := tqdm.tqdm(range(100))):
-        optimizer.zero_grad()
-        loss = model(image, text_input, text_output)
-        loss.backward()
-        optimizer.step()
-
-        bar.set_description(f"Training progress")
-        bar.set_postfix({"iter": i, "loss": loss.cpu().item()})
