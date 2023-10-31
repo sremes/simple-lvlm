@@ -98,13 +98,16 @@ def load_checkpoint(
     logging.info(f"Loading checkpoint from {path}")
     ckpt = torch.load(path, map_location="cpu")
     model.load_state_dict(ckpt["model_state_dict"], strict=False)
-    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    try:
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    except ValueError as e:
+        logging.info(f"Not loading optimizer state: {e}")
 
 
 def train(model: torch.nn.Module, data_loader: DataLoader, num_epochs: int = 1) -> None:
-    optimizer = torch.optim.AdamW(
-        filter(lambda x: x.requires_grad, model.parameters()), lr=1e-4
-    )
+    trainable_parameters = list(filter(lambda p: p.requires_grad, model.parameters()))
+    logging.info(f"Number of trainable parameters: {len(trainable_parameters)}")
+    optimizer = torch.optim.AdamW(trainable_parameters, lr=1e-4, fused=True, eps=1e-4)
     ckpt_path = Path("checkpoints/last.ckpt")
     if ckpt_path.exists():
         load_checkpoint(model, optimizer, ckpt_path)
@@ -128,14 +131,16 @@ def train(model: torch.nn.Module, data_loader: DataLoader, num_epochs: int = 1) 
 
 
 if __name__ == "__main__":
+    device = torch.device("cuda")
     model = LVLM(
         language_model="stabilityai/stablelm-3b-4e1t",
         vision_model="openai/clip-vit-large-patch14",
+        device=device
     )
     dataset = LLaVADataset(
         annotations_file="data/llava_v1_5_mix665k.json",
         image_dir=Path("/stash/datasets"),
         image_processor=model.image_processor,
     )
-    data_loader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=2)
+    data_loader = DataLoader(dataset, batch_size=10, shuffle=True, num_workers=2)
     train(model, data_loader, num_epochs=1)
