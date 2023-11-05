@@ -6,9 +6,15 @@ from transformers import (
     AutoTokenizer,
     CLIPVisionModel,
     CLIPImageProcessor,
-    BitsAndBytesConfig
+    BitsAndBytesConfig,
 )
-from peft import get_peft_model, prepare_model_for_kbit_training, IA3Config, LoraConfig, TaskType
+from peft import (
+    get_peft_model,
+    prepare_model_for_kbit_training,
+    IA3Config,
+    LoraConfig,
+    TaskType,
+)
 
 from typing import Optional
 import os
@@ -33,7 +39,7 @@ class LVLM(torch.nn.Module):
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.bfloat16,
                 bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4"
+                bnb_4bit_quant_type="nf4",
             )
             self.llm = AutoModelForCausalLM.from_pretrained(
                 language_model,
@@ -79,16 +85,16 @@ class LVLM(torch.nn.Module):
                 load_in_4bit=True,
                 bnb_4bit_compute_dtype=torch.bfloat16,
                 bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4"
+                bnb_4bit_quant_type="nf4",
             )
             self.vision_model = CLIPVisionModel.from_pretrained(
-                vision_model, 
-                torch_dtype=torch.bfloat16, 
+                vision_model,
+                torch_dtype=torch.bfloat16,
                 quantization_config=quantization_config,
             )
         else:
             self.vision_model = CLIPVisionModel.from_pretrained(
-                vision_model, 
+                vision_model,
                 torch_dtype=torch.bfloat16,
             ).to(self.device)
         for param in self.vision_model.parameters():
@@ -100,7 +106,7 @@ class LVLM(torch.nn.Module):
         embed_dim = self.llm.config.hidden_size
         self.vision_adapter = torch.nn.MultiheadAttention(
             embed_dim=embed_dim,
-            num_heads=1,
+            num_heads=4,
             bias=False,
             batch_first=True,
             device=self.device,
@@ -168,12 +174,12 @@ class LVLM(torch.nn.Module):
         input_lengths = torch.sum(input_tokens.attention_mask, dim=1)
         full_tokens = self.tokenizer(
             text=[
-                f"\nQuestion: {inp}\nAnswer: {out}"
+                f"\nQuestion: {inp}\nAnswer: {out}<|endoftext|>"
                 for inp, out in zip(text_input, text_output)
             ],
             padding=True,
             truncation=True,
-            max_length=128,
+            max_length=128 + 32,
             return_tensors="pt",
         ).to(self.device)
         full_embeds = self.llm.get_input_embeddings()(full_tokens.input_ids)
@@ -188,9 +194,9 @@ class LVLM(torch.nn.Module):
         )
         # create labels, ignoring all but tokens corresponding to `text_output`
         batch_size, num_tokens = full_tokens.input_ids.shape[:2]
-        mask_input_tokens = torch.arange(num_tokens, device=self.device).reshape(
+        mask_output_tokens = torch.arange(num_tokens, device=self.device).reshape(
             -1, num_tokens
-        ).repeat((batch_size, 1)) < input_lengths.unsqueeze(1)
+        ).repeat((batch_size, 1)) >= input_lengths.unsqueeze(1)
         labels = torch.cat(
             [
                 -100
@@ -198,15 +204,13 @@ class LVLM(torch.nn.Module):
                     image_embeds.shape[:-1], device=self.device, dtype=torch.long
                 ),  # ignore image tokens in loss
                 torch.where(
-                    mask_input_tokens, -100, full_tokens.input_ids
-                ),  # ignore tokens from `text_input` in loss
+                    (mask_output_tokens * full_tokens.attention_mask).bool(),
+                    full_tokens.input_ids,
+                    -100,
+                ),  # ignore tokens from `text_input` in loss, and tokens in padded part
             ],
             dim=1,
         )
-        labels = torch.where(
-            labels == self.tokenizer.pad_token_id, -100, labels
-        )  # ignore all padding
-        # print("labels:", labels, labels.shape)
 
         output = self.llm(
             inputs_embeds=inputs_embeds,
@@ -220,7 +224,7 @@ class LVLM(torch.nn.Module):
         image_embeds = self.get_image_tokens(image)
         # tokenize and embed texts
         input_tokens = self.tokenizer(
-            text=[f"\nQuestion: {question}\nAnswer: "],
+            text=[f"\nQuestion: {question}\nAnswer:"],
             return_tensors="pt",
         ).to(self.device)
         input_embeds = self.llm.get_input_embeddings()(input_tokens.input_ids)
