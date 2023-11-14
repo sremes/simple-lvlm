@@ -106,19 +106,36 @@ def load_checkpoint(
         logging.info(f"Not loading optimizer state: {e}")
 
 
-def train(model: torch.nn.Module, data_loader: DataLoader, num_epochs: int = 1) -> None:
+def setup_optimizer(
+        model: torch.nn.Module, 
+        lr: float = 2e-4,
+) -> tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LRScheduler]:
+    trainable_parameters = list(filter(lambda p: p.requires_grad, model.parameters()))
+    optimizer = bnb.optim.AdamW8bit(trainable_parameters, lr=lr, eps=1e-5)
+    lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, 1000, T_mult=1, eta_min=1e-6, last_epoch=-1, verbose=False
+    )
+    return optimizer, lr_scheduler
+
+
+def train(
+        model: torch.nn.Module, 
+        optimizer: torch.optim.Optimizer, 
+        lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
+        data_loader: DataLoader, 
+        num_epochs: int = 1,
+        grad_accumulation_steps: int = 4
+) -> None:
     trainable_parameters = list(filter(lambda p: p.requires_grad, model.parameters()))
     logging.info(
         f"Number of trainable parameters: {sum(p.numel() for p in trainable_parameters)}"
     )
     # optimizer = torch.optim.AdamW(trainable_parameters, lr=1e-5, fused=True, eps=1e-4)
-    optimizer = bnb.optim.AdamW8bit(trainable_parameters, lr=3e-6, eps=1e-4)
     ckpt_path = Path("checkpoints/last.ckpt")
     if ckpt_path.exists():
         load_checkpoint(model, optimizer, ckpt_path)
     logging.info("starting training")
     writer = SummaryWriter()
-    grad_accumulation_steps = 4
     for epoch in range(num_epochs):
         logging.info(f"Epoch: {epoch}")
         for step, data in enumerate(bar := tqdm.tqdm(data_loader)):
@@ -127,14 +144,23 @@ def train(model: torch.nn.Module, data_loader: DataLoader, num_epochs: int = 1) 
                 text_input=data["text_input"],
                 text_output=data["text_output"],
             )
-            (loss / grad_accumulation_steps).backward()
+            # (loss / grad_accumulation_steps).backward()
+            accelerator.backward(loss / grad_accumulation_steps)
             if (step + 1) % grad_accumulation_steps == 0:
                 optimizer.step()
+                lr_scheduler.step(step)
                 optimizer.zero_grad()
 
             bar.set_description(f"Training progress")
-            bar.set_postfix({"iter": step, "loss": loss.cpu().item()})
+            bar.set_postfix(
+                {
+                    "iter": step,
+                    "loss": loss.cpu().item(),
+                    "lr": lr_scheduler.get_last_lr(),
+                }
+            )
             writer.add_scalar("loss", loss, step)
+            writer.add_scalar("lr", lr_scheduler.get_last_lr()[0], step)
             if step % 1000 == 0:
                 logging.info(f"saving checkpoint at epoch {epoch}, iter {step}")
                 save_checkpoint(model, optimizer, epoch, ckpt_path)
@@ -142,16 +168,23 @@ def train(model: torch.nn.Module, data_loader: DataLoader, num_epochs: int = 1) 
 
 
 if __name__ == "__main__":
-    device = torch.device("cuda")
+    from accelerate import Accelerator
+    accelerator = Accelerator()
+
+    # device = torch.device("cuda")
     model = LVLM(
         language_model="stabilityai/stablelm-3b-4e1t",
         vision_model="openai/clip-vit-large-patch14",
-        device=device,
+        device=accelerator.device,
     )
     dataset = LLaVADataset(
         annotations_file="data/llava_v1_5_mix665k.json",
         image_dir=Path("/stash/datasets"),
         image_processor=model.image_processor,
     )
-    data_loader = DataLoader(dataset, batch_size=8, shuffle=True, num_workers=2)
-    train(model, data_loader, num_epochs=1)
+    data_loader = DataLoader(dataset, batch_size=6, shuffle=True, num_workers=2)
+    optimizer, scheduler = setup_optimizer(model)
+    model, optimizer, training_dataloader, scheduler = accelerator.prepare(
+        model, optimizer, data_loader, scheduler
+    )
+    train(model, optimizer, scheduler, data_loader, num_epochs=1)
