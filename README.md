@@ -9,10 +9,5 @@ This code implements a very simple large vision-language model.
 
 ## ROCm Docker
 
-Fill in Huggingface token into `docker.env`. Then build the docker image and source the convenient alias `rocm` from `env.sh` to run commands inside the container.
-```bash
-docker build -f Dockerfile .
-docker tag "image_id_from_above" rocm-transformers
-source env.sh
-rocm python model.py  # runs python inside the rocm container
-```
+Fill in your Huggingface token into `docker.env` and some paths into a `docker-compose.yml` file,
+you can find a template here. The Dockerfile for the image itself can be found at [rocm-docker](https://github.com/sremes/rocm-docker).
