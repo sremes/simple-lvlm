@@ -1,0 +1,25 @@
+services:
+  rocm:
+    image: ghcr.io/sremes/rocm-docker:main
+    volumes:
+      - .:/app
+      - .../datasets:/stash/datasets
+      - .../ecoset:/stash/ecoset
+      - .../cache:/stash/cache
+    devices:
+      - "/dev/kfd"
+      - "/dev/dri"
+    shm_size: 16G
+    ipc: host
+    network_mode: host
+    ports:
+      - 7860:7860
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+    group_add:
+      - video
+    environment:
+      - TRANSFORMERS_CACHE=/stash/cache
+      - HUGGING_FACE_HUB_TOKEN=...

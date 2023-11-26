@@ -1,1 +1,0 @@
-alias rocm="docker run -it --rm --cap-add=SYS_PTRACE --security-opt seccomp=unconfined --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host --shm-size 8G --env-file docker.env -v .:/app -v /stash/datasets:/stash/datasets -p 7860:7860 rocm-transformers:latest"
