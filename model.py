@@ -112,6 +112,23 @@ class LVLM(torch.nn.Module):
             device=self.device,
             dtype=torch.bfloat16,
         )
+        self.post_vision_norm = torch.nn.LayerNorm(
+            embed_dim, eps=1e-4, dtype=torch.bfloat16, device=self.device
+        )
+        self.vision_mlp = torch.nn.Sequential(
+            torch.nn.Linear(
+                embed_dim, 2 * embed_dim, device=self.device, dtype=torch.bfloat16
+            ),
+            torch.nn.SiLU(),
+            torch.nn.Dropout(0.1),
+            torch.nn.Linear(
+                2 * embed_dim, embed_dim, device=self.device, dtype=torch.bfloat16
+            ),
+            torch.nn.Dropout(0.1),
+        )
+        self.vision_mlp_norm = torch.nn.LayerNorm(
+            embed_dim, eps=1e-4, dtype=torch.bfloat16, device=self.device
+        )
         self.vision_linear = torch.nn.Sequential(
             torch.nn.Linear(
                 self.vision_model.config.hidden_size,
@@ -119,6 +136,7 @@ class LVLM(torch.nn.Module):
                 device=self.device,
                 dtype=torch.bfloat16,
             ),
+            torch.nn.Dropout(0.1),
             torch.nn.LayerNorm(embed_dim, device=self.device, dtype=torch.bfloat16),
         )
         self.num_queries = num_queries
@@ -147,16 +165,18 @@ class LVLM(torch.nn.Module):
     def get_image_tokens(self, image: torch.Tensor) -> torch.Tensor:
         # get image features and tokens for llm
         image_features = self.vision_linear(self.vision_model(image)[0])
-        # print("self.queries:", self.queries.shape)
-        # print("image_features:", image_features.shape)
-        # print("self.pos_embed:", self.pos_embed.shape)
-        image_tokens = self.vision_adapter(
-            query=self.queries.repeat((image.shape[0], 1, 1)),
-            key=image_features + self.pos_embed,
-            value=image_features,
-        )[0]
-        # print("image_tokens:", image_tokens.shape)
-        return image_tokens
+        queries = self.queries.repeat((image.shape[0], 1, 1))
+        image_tokens = (
+            queries
+            + self.vision_adapter(
+                query=queries,
+                key=image_features + self.pos_embed,
+                value=image_features,
+            )[0]
+        )
+        image_tokens = self.post_vision_norm(image_tokens)
+        image_tokens = image_tokens + self.vision_mlp(image_tokens)
+        return self.vision_mlp_norm(image_tokens)
 
     def forward(
         self, image: torch.Tensor, text_input: list[str], text_output: list[str]
@@ -174,7 +194,7 @@ class LVLM(torch.nn.Module):
         input_lengths = torch.sum(input_tokens.attention_mask, dim=1)
         full_tokens = self.tokenizer(
             text=[
-                f"\nQuestion: {inp}\nAnswer: {out}<|endoftext|>"
+                f"\n###Question: {inp}\n###Answer: {out}<|endoftext|>"
                 for inp, out in zip(text_input, text_output)
             ],
             padding=True,
@@ -224,7 +244,7 @@ class LVLM(torch.nn.Module):
         image_embeds = self.get_image_tokens(image)
         # tokenize and embed texts
         input_tokens = self.tokenizer(
-            text=[f"\nQuestion: {question}\nAnswer:"],
+            text=[f"\n###Question: {question}\n###Answer:"],
             return_tensors="pt",
         ).to(self.device)
         input_embeds = self.llm.get_input_embeddings()(input_tokens.input_ids)
