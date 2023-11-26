@@ -1,3 +1,6 @@
-peft
-transformers
+accelerate
+bitsandbytes
 gradio
+peft
+tensorboard
+transformers
