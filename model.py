@@ -7,17 +7,50 @@ from transformers import (
     CLIPVisionModel,
     CLIPImageProcessor,
     BitsAndBytesConfig,
+    PreTrainedTokenizer,
 )
 from peft import (
     get_peft_model,
-    prepare_model_for_kbit_training,
-    IA3Config,
     LoraConfig,
     TaskType,
 )
 
 from typing import Optional
 import os
+from pathlib import Path
+
+
+class Captioner(torch.nn.Module):
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizer,
+        device: torch.device,
+        dtype: torch.dtype = torch.bfloat16,
+    ) -> None:
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.device, self.dtype = device, dtype
+
+    def forward(
+        self,
+        image_features: torch.Tensor,
+        texts: list[str],
+        embeddings: torch.nn.Module,
+    ) -> torch.Tensor:
+        # get targets from caption/target text
+        text_tokens = self.tokenizer(
+            text=texts,
+            padding=True,
+            truncation=True,
+            max_length=128,
+            return_tensors="pt",
+        ).to(self.device)
+        targets = embeddings(text_tokens.input_ids)
+        # compute matching loss between image tokens and text tokens
+        # by matching each image token to most similar text token
+        costs = torch.cdist(image_features, targets, p=2)
+        smallest_distances = torch.min(costs, dim=-1).values
+        return smallest_distances.mean()
 
 
 class LVLM(torch.nn.Module):
@@ -47,6 +80,7 @@ class LVLM(torch.nn.Module):
                 trust_remote_code=True,
                 token=os.getenv("HUGGING_FACE_HUB_TOKEN"),
                 quantization_config=quantization_config,
+                # attn_implementation="flash_attention_2",
             )
         else:
             # load without quantization that requires "cuda" device
@@ -62,20 +96,13 @@ class LVLM(torch.nn.Module):
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # add PEFT adapter
-        if False:
-            peft_config = IA3Config(
-                task_type=TaskType.CAUSAL_LM,
-                target_modules=["q_proj", "k_proj", "v_proj", "lm_head"],
-                feedforward_modules=["lm_head"],
-            )
-        else:
-            peft_config = LoraConfig(
-                task_type=TaskType.CAUSAL_LM,
-                target_modules=["q_proj", "k_proj", "v_proj", "lm_head"],
-                r=16,
-                lora_alpha=32,
-                lora_dropout=0.05,
-            )
+        peft_config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            target_modules=["q_proj", "k_proj", "v_proj", "lm_head"],
+            r=16,
+            lora_alpha=32,
+            lora_dropout=0.05,
+        )
         self.llm = get_peft_model(self.llm, peft_config)
 
         # load the CLIP vision model
@@ -106,7 +133,7 @@ class LVLM(torch.nn.Module):
         embed_dim = self.llm.config.hidden_size
         self.vision_adapter = torch.nn.MultiheadAttention(
             embed_dim=embed_dim,
-            num_heads=4,
+            num_heads=16,
             bias=False,
             batch_first=True,
             device=self.device,
@@ -147,20 +174,10 @@ class LVLM(torch.nn.Module):
             )
         )
 
-        # position embeddings
-        grid_size = (
-            self.vision_model.config.image_size // self.vision_model.config.patch_size
-        )
-        self.pos_embed = (
-            torch.nn.Parameter(
-                torch.from_numpy(
-                    get_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=True)
-                ).bfloat16(),
-                requires_grad=False,
-            )
-            .unsqueeze(dim=0)
-            .to(self.device)
-        )
+        # captioning-like loss
+        #self.captioner = Captioner(
+        #    self.tokenizer, device=self.device, dtype=torch.bfloat16
+        #)
 
     def get_image_tokens(self, image: torch.Tensor) -> torch.Tensor:
         # get image features and tokens for llm
@@ -170,7 +187,7 @@ class LVLM(torch.nn.Module):
             queries
             + self.vision_adapter(
                 query=queries,
-                key=image_features + self.pos_embed,
+                key=image_features,  # + self.pos_embed,
                 value=image_features,
             )[0]
         )
@@ -184,8 +201,12 @@ class LVLM(torch.nn.Module):
         # get image tokens for llm
         image_embeds = self.get_image_tokens(image)
         # tokenize and embed texts
+        start_tokens = self.tokenizer(
+            text=["<|user|>\n"] * len(text_input), return_tensors="pt"
+        ).to(self.device)
+        start_embeds = self.llm.get_input_embeddings()(start_tokens.input_ids)
         input_tokens = self.tokenizer(
-            text=[f"\nQuestion: {inp}\nAnswer:" for inp in text_input],
+            text=[f"\n\n{inp}<|endoftext|>\n<|assistant|>\n" for inp in text_input],
             padding=True,
             truncation=True,
             max_length=128,
@@ -194,7 +215,7 @@ class LVLM(torch.nn.Module):
         input_lengths = torch.sum(input_tokens.attention_mask, dim=1)
         full_tokens = self.tokenizer(
             text=[
-                f"\n###Question: {inp}\n###Answer: {out}<|endoftext|>"
+                f"\n\n{inp}<|endoftext|>\n<|assistant|>\n{out}<|endoftext|>"
                 for inp, out in zip(text_input, text_output)
             ],
             padding=True,
@@ -204,9 +225,10 @@ class LVLM(torch.nn.Module):
         ).to(self.device)
         full_embeds = self.llm.get_input_embeddings()(full_tokens.input_ids)
         # cat image tokens and text tokens
-        inputs_embeds = torch.cat([image_embeds, full_embeds], dim=1)
+        inputs_embeds = torch.cat([start_embeds, image_embeds, full_embeds], dim=1)
         inputs_attention_mask = torch.cat(
             [
+                start_tokens.attention_mask,
                 torch.ones(image_embeds.shape[:-1], device=self.device),
                 full_tokens.attention_mask,
             ],
@@ -219,6 +241,10 @@ class LVLM(torch.nn.Module):
         ).repeat((batch_size, 1)) >= input_lengths.unsqueeze(1)
         labels = torch.cat(
             [
+                -100
+                * torch.ones(
+                    start_embeds.shape[:-1], device=self.device, dtype=torch.long
+                ),  # ignore start tokens
                 -100
                 * torch.ones(
                     image_embeds.shape[:-1], device=self.device, dtype=torch.long
@@ -237,32 +263,39 @@ class LVLM(torch.nn.Module):
             attention_mask=inputs_attention_mask,
             labels=labels,
         )
-        return output.loss
+
+        #cap_loss = self.captioner(
+        #    image_embeds, text_output, self.llm.get_base_model().get_input_embeddings()
+        #)
+
+        return output.loss  # + 0.1 * cap_loss
 
     def generate(self, image: torch.Tensor, question: str, **kwargs) -> str:
+        """Generate answer with given image and question."""
         # get image tokens for llm
         image_embeds = self.get_image_tokens(image)
+
         # tokenize and embed texts
-        input_tokens = self.tokenizer(
-            text=[f"\n###Question: {question}\n###Answer:"],
+        start_tokens = self.tokenizer(
+            text=["<|user|>\n"], return_tensors="pt"
+        ).to(self.device)
+        start_embeds = self.llm.get_input_embeddings()(start_tokens.input_ids)
+
+        prompt_tokens = self.tokenizer(
+            text=[f"\n\n{question}<|endoftext|>\n<|assistant|>\n"],
             return_tensors="pt",
         ).to(self.device)
-        input_embeds = self.llm.get_input_embeddings()(input_tokens.input_ids)
+        prompt_embeds = self.llm.get_input_embeddings()(prompt_tokens.input_ids)
+
         # cat image tokens and text tokens
-        inputs_embeds = torch.cat([image_embeds, input_embeds], dim=1)
-        inputs_attention_mask = torch.cat(
-            [
-                torch.ones(image_embeds.shape[:-1], device=self.device),
-                input_tokens.attention_mask,
-            ],
-            dim=1,
-        )
+        inputs_embeds = torch.cat([start_embeds, image_embeds, prompt_embeds], dim=1)
+
+        # call the llm generate implementation
         output = self.llm.generate(
             inputs_embeds=inputs_embeds,
-            attention_mask=inputs_attention_mask,
             **kwargs,
         )[0]
-        return self.tokenizer.decode(output, skip_special_tokens=True)
+        return self.tokenizer.decode(output, skip_special_tokens=False)
 
 
 if __name__ == "__main__":

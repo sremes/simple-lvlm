@@ -94,6 +94,8 @@ class Ecoset(torchvision.datasets.ImageFolder):
         "In this image, there is {0} {1}.",
         "I can see there is {0} {1} in the image.",
         "The main object in this image is {0} {1}.",
+        "{1}.",
+        "Object: {1}."
     )
     vowels: tuple[str] = ("a", "e", "i", "o", "u")
 
@@ -151,7 +153,7 @@ def setup_optimizer(
     trainable_parameters = list(filter(lambda p: p.requires_grad, model.parameters()))
     optimizer = bnb.optim.AdamW8bit(trainable_parameters, lr=lr, eps=1e-5)
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, 2000, T_mult=1, eta_min=1e-6, last_epoch=-1, verbose=False
+        optimizer, 5000, T_mult=1, eta_min=1e-6, last_epoch=-1, verbose=False
     )
     return optimizer, lr_scheduler
 
@@ -232,7 +234,7 @@ if __name__ == "__main__":
     accelerator = Accelerator()
 
     model = LVLM(
-        language_model="stabilityai/stablelm-3b-4e1t",
+        language_model="stabilityai/stablelm-zephyr-3b",
         vision_model="openai/clip-vit-large-patch14",
         device=accelerator.device,
     )
@@ -242,13 +244,13 @@ if __name__ == "__main__":
         image_dir=Path("/stash/datasets"),
         image_processor=model.image_processor,
     )
-    # ecoset_dataset = Ecoset(
-    #    root="/stash/ecoset/train",
-    #    transform=partial(model.image_processor, return_tensors="pt"),
-    # )
-    # dataset = ConcatDataset((llava_dataset, ecoset_dataset))
+    ecoset_dataset = Ecoset(
+       root="/stash/ecoset/train",
+       transform=partial(model.image_processor, return_tensors="pt"),
+    )
+    dataset = ConcatDataset((llava_dataset, ecoset_dataset))
     data_loader = DataLoader(
-        llava_dataset, batch_size=8, shuffle=True, num_workers=2, pin_memory=True
+        dataset, batch_size=6, shuffle=True, num_workers=2, pin_memory=True
     )
     # validation data
     val_dataset = LLaVADataset(
@@ -265,4 +267,12 @@ if __name__ == "__main__":
         model, optimizer, data_loader, scheduler, val_loader
     )
 
-    train(model, optimizer, scheduler, data_loader, val_loader, num_epochs=1)
+    train(
+        model,
+        optimizer,
+        scheduler,
+        data_loader,
+        val_loader,
+        num_epochs=1,
+        grad_accumulation_steps=8,
+    )

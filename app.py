@@ -11,7 +11,7 @@ model: LVLM = None
 def load_model(checkpoint_path: Path) -> LVLM:
     global model
     model = LVLM(
-        language_model="stabilityai/stablelm-3b-4e1t",
+        language_model="stabilityai/stablelm-zephyr-3b",
         vision_model="openai/clip-vit-large-patch14",
     )
     model.load_state_dict(torch.load(checkpoint_path)["model_state_dict"], strict=False)
