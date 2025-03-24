@@ -72,10 +72,14 @@ def train(args):
     # load state or init
     if args.ckpt is not None:
         checkpoint = torch.load(args.ckpt, map_location="cpu")
-        model.load_state_dict(checkpoint["model"])
-        optimizer.load_state_dict(checkpoint["optimizer"])
+        model.load_state_dict(checkpoint["model"], strict=False)
+        try:
+            optimizer.load_state_dict(checkpoint["optimizer"])
+        except ValueError as e:
+            print("warning: ", e)
+            pass
+        global_step = checkpoint["step"] if "step" in checkpoint else 0
         del checkpoint
-        global_step = checkpoint["step"]
     else:
         model.apply(init_weights)
         global_step = 0
